@@ -1,3 +1,4 @@
+# Version: v1.0.0
 <#
 .SYNOPSIS
     Exports all code files (including .txt) from a selected project folder to a single TXT file, respecting .gitignore patterns.
