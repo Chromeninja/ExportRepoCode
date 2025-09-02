@@ -1,0 +1,273 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  release:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set version from tag or input
+      id: version
+      shell: pwsh
+      run: |
+        if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+          $version = "${{ github.event.inputs.version }}"
+        } else {
+          $version = "${{ github.ref_name }}"
+        }
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "Version: $version"
+    
+    - name: Update version in PowerShell script
+      shell: pwsh
+      run: |
+        $version = "${{ steps.version.outputs.version }}"
+        $content = Get-Content "ExportRepoCode.ps1" -Raw
+        $newContent = $content -replace '# Version: .*\r?\n', ''
+        $newContent = "# Version: $version`r`n$newContent"
+        Set-Content "ExportRepoCode.ps1" -Value $newContent -NoNewline
+    
+    - name: Create batch wrapper
+      shell: pwsh
+      run: |
+        $batContent = @"
+@echo off
+REM ExportRepoCode Windows Batch Wrapper
+REM Version: ${{ steps.version.outputs.version }}
+
+echo Starting ExportRepoCode...
+echo.
+
+REM Check if PowerShell is available
+powershell -Command "Get-Host" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo ERROR: PowerShell is not available on this system.
+    echo Please install PowerShell or run ExportRepoCode.ps1 directly.
+    pause
+    exit /b 1
+)
+
+REM Run the PowerShell script
+powershell -ExecutionPolicy Bypass -File "%~dp0ExportRepoCode.ps1"
+
+REM Pause to show results
+echo.
+echo Press any key to close...
+pause >nul
+"@
+        Set-Content "ExportRepoCode.bat" -Value $batContent
+    
+    - name: Install ps2exe for executable creation
+      shell: pwsh
+      run: |
+        Install-Module ps2exe -Force -Scope CurrentUser
+    
+    - name: Create standalone executable
+      shell: pwsh
+      run: |
+        Import-Module ps2exe
+        
+        # Create a version with embedded icon support and better error handling
+        $exeScript = @"
+# ExportRepoCode Executable Version
+# Version: ${{ steps.version.outputs.version }}
+# This is a standalone executable version of ExportRepoCode
+
+# Add console window title
+`$Host.UI.RawUI.WindowTitle = "ExportRepoCode ${{ steps.version.outputs.version }}"
+
+# Error handling wrapper
+try {
+$(Get-Content "ExportRepoCode.ps1" -Raw)
+} catch {
+    Write-Host "An error occurred: `$(`$_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Press any key to exit..." -ForegroundColor Yellow
+    `$null = `$Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 1
+}
+
+# Pause at the end for executable version
+Write-Host "`nPress any key to exit..." -ForegroundColor Green
+`$null = `$Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+"@
+        
+        Set-Content "ExportRepoCode-Standalone.ps1" -Value $exeScript
+        
+        # Convert to executable
+        Invoke-ps2exe -inputFile "ExportRepoCode-Standalone.ps1" -outputFile "ExportRepoCode.exe" -noConsole:$false -title "ExportRepoCode" -description "Export repository code to text file" -company "ExportRepoCode" -version "${{ steps.version.outputs.version }}.0" -noError -noOutput
+    
+    - name: Create installation script
+      shell: pwsh
+      run: |
+        $installScript = @"
+# ExportRepoCode Installation Script
+# Version: ${{ steps.version.outputs.version }}
+
+param(
+    [string]`$InstallPath = "`$env:USERPROFILE\ExportRepoCode",
+    [switch]`$AddToPath,
+    [switch]`$CreateDesktopShortcut
+)
+
+Write-Host "ExportRepoCode Installation Script" -ForegroundColor Green
+Write-Host "Version: ${{ steps.version.outputs.version }}" -ForegroundColor Green
+Write-Host ""
+
+# Create installation directory
+if (-not (Test-Path `$InstallPath)) {
+    New-Item -Path `$InstallPath -ItemType Directory -Force | Out-Null
+    Write-Host "Created installation directory: `$InstallPath" -ForegroundColor Yellow
+}
+
+# Download files (when run from GitHub release)
+`$baseUrl = "https://github.com/Chromeninja/ExportRepoCode/releases/download/${{ steps.version.outputs.version }}"
+`$files = @("ExportRepoCode.ps1", "ExportRepoCode.bat", "ExportRepoCode.exe")
+
+foreach (`$file in `$files) {
+    try {
+        `$destinationPath = Join-Path `$InstallPath `$file
+        Write-Host "Downloading `$file..." -ForegroundColor Cyan
+        Invoke-WebRequest -Uri "`$baseUrl/`$file" -OutFile `$destinationPath
+        Write-Host "Downloaded: `$destinationPath" -ForegroundColor Green
+    } catch {
+        Write-Warning "Failed to download `$file: `$(`$_.Exception.Message)"
+    }
+}
+
+# Add to PATH if requested
+if (`$AddToPath) {
+    `$currentPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+    if (`$currentPath -notlike "*`$InstallPath*") {
+        [Environment]::SetEnvironmentVariable("PATH", "`$currentPath;`$InstallPath", "User")
+        Write-Host "Added `$InstallPath to user PATH" -ForegroundColor Green
+        Write-Host "Restart your terminal to use 'ExportRepoCode' command" -ForegroundColor Yellow
+    }
+}
+
+# Create desktop shortcut if requested
+if (`$CreateDesktopShortcut) {
+    `$desktopPath = [Environment]::GetFolderPath("Desktop")
+    `$shortcutPath = Join-Path `$desktopPath "ExportRepoCode.lnk"
+    `$targetPath = Join-Path `$InstallPath "ExportRepoCode.bat"
+    
+    if (Test-Path `$targetPath) {
+        `$shell = New-Object -ComObject WScript.Shell
+        `$shortcut = `$shell.CreateShortcut(`$shortcutPath)
+        `$shortcut.TargetPath = `$targetPath
+        `$shortcut.WorkingDirectory = `$InstallPath
+        `$shortcut.Description = "Export repository code to text file"
+        `$shortcut.Save()
+        Write-Host "Created desktop shortcut: `$shortcutPath" -ForegroundColor Green
+    }
+}
+
+Write-Host ""
+Write-Host "Installation complete!" -ForegroundColor Green
+Write-Host "Installation directory: `$InstallPath" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Usage options:" -ForegroundColor Yellow
+Write-Host "  1. Run from installation directory: `$InstallPath\ExportRepoCode.bat" -ForegroundColor White
+Write-Host "  2. PowerShell: `$InstallPath\ExportRepoCode.ps1" -ForegroundColor White
+Write-Host "  3. Executable: `$InstallPath\ExportRepoCode.exe" -ForegroundColor White
+if (`$AddToPath) {
+    Write-Host "  4. From anywhere (after terminal restart): ExportRepoCode.bat" -ForegroundColor White
+}
+"@
+        Set-Content "install.ps1" -Value $installScript
+    
+    - name: Create release notes
+      shell: pwsh
+      run: |
+        $releaseNotes = @"
+# ExportRepoCode ${{ steps.version.outputs.version }}
+
+## 📦 Release Artifacts
+
+This release includes multiple distribution formats:
+
+### 🔧 **ExportRepoCode.ps1** (Recommended)
+- Original PowerShell script
+- Cross-platform (Windows, macOS, Linux with PowerShell)
+- Requires PowerShell 5.1+ or PowerShell Core 6+
+
+### 🪟 **ExportRepoCode.bat** 
+- Windows batch wrapper for easier execution
+- Double-click to run on Windows
+- Automatically launches PowerShell script
+
+### 📱 **ExportRepoCode.exe**
+- Standalone Windows executable
+- No PowerShell knowledge required
+- Self-contained, ready to run
+
+### ⚡ **install.ps1**
+- Automated installation script
+- Downloads and sets up ExportRepoCode
+- Optional PATH integration and desktop shortcut
+
+## 🚀 Quick Start
+
+### Windows Users (Easiest)
+1. Download **ExportRepoCode.bat**
+2. Place it in a folder containing your project subdirectories
+3. Double-click to run
+
+### Cross-Platform Users
+1. Download **ExportRepoCode.ps1**
+2. Place it in a folder containing your project subdirectories  
+3. Run: ``pwsh ExportRepoCode.ps1`` or ``powershell ExportRepoCode.ps1``
+
+### Automated Installation
+1. Download and run **install.ps1**:
+   ```powershell
+   Invoke-WebRequest -Uri "https://github.com/Chromeninja/ExportRepoCode/releases/download/${{ steps.version.outputs.version }}/install.ps1" -OutFile "install.ps1"
+   .\install.ps1 -AddToPath -CreateDesktopShortcut
+   ```
+
+## 📋 What's Included
+
+- 🎯 Respects `.gitignore` patterns automatically
+- 🔍 Smart filtering of common noise files (`node_modules`, `__pycache__`, etc.)
+- 📄 Includes `.txt` files by default
+- 🛡️ Skips sensitive files (`.env`, secrets, etc.)
+- 🌐 Cross-platform PowerShell support
+
+## 💡 Usage
+
+1. Place the script in a directory containing project folders
+2. Run the script
+3. Select which project to export
+4. Get a combined `ProjectName-ALLCODE.txt` file with all your code
+
+Perfect for sharing code with LLMs, code reviews, or project archival!
+"@
+        Set-Content "RELEASE_NOTES.md" -Value $releaseNotes
+    
+    - name: Create release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.version.outputs.version }}
+        name: ExportRepoCode ${{ steps.version.outputs.version }}
+        body_path: RELEASE_NOTES.md
+        draft: false
+        prerelease: false
+        files: |
+          ExportRepoCode.ps1
+          ExportRepoCode.bat
+          ExportRepoCode.exe
+          install.ps1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
